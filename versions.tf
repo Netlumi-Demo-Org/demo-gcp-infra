@@ -8,11 +8,14 @@ terraform {
     }
   }
 
-  # State is kept outside this repository. Point it at a local file when you
-  # initialise, for example:
-  #   terraform init -backend-config="path=$HOME/acme-ledger-gcp-state/terraform.tfstate"
-  # Swap this block for `backend "gcs" {}` to keep the state in a bucket.
-  backend "local" {}
+  # Remote state in a GCS bucket in the demo project (created once, see
+  # README "Apply"). Netlumi reads it to map findings to this code.
+  # Credentials come from the environment (application-default credentials
+  # or GOOGLE_OAUTH_ACCESS_TOKEN).
+  backend "gcs" {
+    bucket = "acme-ledger-tfstate-291502462067"
+    prefix = "demo-gcp-infra"
+  }
 }
 
 provider "google" {

@@ -34,7 +34,8 @@ placeholder text file.
   │  BigQuery         dataset acme_ledger_analytics (US, empty)          │
   │  Artifact Registry acme-ledger-containers (Docker, empty)            │
   └──────────────────────────────────────────────────────────────────────┘
-  State: local file outside this repository (see Apply).
+  State: gs://acme-ledger-tfstate-291502462067/demo-gcp-infra/default.tfstate
+         (uniform access, public access prevention enforced, versioned)
 ```
 
 There is no compute: no VMs, GKE, Cloud SQL, Cloud Run, load balancers or
@@ -89,18 +90,27 @@ Notes:
   `enablementState = SCANNING_DISABLED`.
 - Pub/Sub is not part of the stack: Netlumi does not collect Pub/Sub topics
   yet, so nothing there would be found.
-- Enabling the Compute Engine API makes GCP create, outside Terraform, a
-  `default` auto-mode network with the `default-allow-ssh`, `-rdp`, `-icmp`
-  and `-internal` firewall rules, and a Compute Engine default service account
-  holding `roles/editor`. They are not in this code, so their findings
-  (`netlumi_gcp_compute_network_default_in_use`, SSH/RDP open on
-  `default-allow-*`, a second editor service account) have no file to map to.
-  Delete the default network in the project if you want only code-mapped
-  findings.
+- GCP itself created a few resources when the Compute Engine API was
+  enabled; see [Created by GCP, not by this code](#created-by-gcp-not-by-this-code).
 - Broader rules will also fire and are not the point of the demo, for example:
   bucket access logging and retention policy (every bucket), BigQuery default
   CMEK, Data Access audit logs, log-metric alerts, a personal Google account
   holding `roles/owner`.
+
+## Created by GCP, not by this code
+
+Enabling the Compute Engine API makes GCP create these in the project. They
+are not in this repository and are left as they are, so their findings have no
+file to map to:
+
+| Resource | What Netlumi will report |
+|---|---|
+| `default` auto-mode VPC network (one subnet per region) | `netlumi_gcp_compute_network_default_in_use`; subnet flow logs / Private Google Access on each `default` subnet |
+| Firewall rule `default-allow-ssh` (tcp/22 from `0.0.0.0/0`) | `netlumi_gcp_compute_firewall_ssh_open_to_internet` |
+| Firewall rule `default-allow-rdp` (tcp/3389 from `0.0.0.0/0`) | `netlumi_gcp_compute_firewall_rdp_open_to_internet` |
+| Firewall rule `default-allow-icmp` (icmp from `0.0.0.0/0`) | none expected |
+| Firewall rule `default-allow-internal` (`10.128.0.0/9`) | none expected |
+| Compute Engine default service account `<projnum>-compute@developer.gserviceaccount.com` with `roles/editor` | contributes to `netlumi_gcp_iam_sa_no_administrative_privileges` on the project |
 
 ## Apply
 
@@ -112,20 +122,33 @@ project.
 
 ```bash
 PROJECT_ID=<gcp-project-id>
-STATE_DIR=$HOME/acme-ledger-gcp-state   # anywhere outside this repository
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+STATE_BUCKET=acme-ledger-tfstate-$PROJECT_NUMBER   # must match versions.tf
 
-# 1. Terraform reads the project through the Resource Manager API (once).
+# 1. Once: the Resource Manager API (Terraform reads the project through it)
+#    and the state bucket (uniform access, public access prevention, versioned).
 gcloud services enable cloudresourcemanager.googleapis.com --project "$PROJECT_ID"
+gcloud storage buckets create "gs://$STATE_BUCKET" --project "$PROJECT_ID" \
+  --location us-central1 --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update "gs://$STATE_BUCKET" --versioning \
+  --update-labels purpose=netlumi-demo,owner=netlumi
 
-# 2. Stack
-terraform init -backend-config="path=$STATE_DIR/terraform.tfstate"
-terraform plan -var project_id=$PROJECT_ID -out="$STATE_DIR/demo.tfplan"
+# 2. Stack (state: gs://$STATE_BUCKET/demo-gcp-infra/default.tfstate)
+terraform init
+terraform plan -var project_id=$PROJECT_ID -out=demo.tfplan
 # review the plan, then:
-terraform apply "$STATE_DIR/demo.tfplan"
+terraform apply demo.tfplan
 ```
 
+The bucket name in `versions.tf` is the `netlumi-demo` project's; for another
+project, change it there (backend blocks cannot use variables).
+
 Then connect the project and this repository to Netlumi and let the scheduled
-scan run.
+scan run. Netlumi's GCP setup grants its reader service account only Cloud
+Asset Inventory and IAM-policy read access; it can read the state bucket only
+when the bucket is named in setup (the Terraform state buckets field in the
+GCP onboarding, `--state-bucket acme-ledger-tfstate-<projnum>` on the setup
+script), which grants `roles/storage.objectViewer` on that bucket alone.
 
 ## Destroy
 
@@ -133,14 +156,15 @@ scan run.
 this stack are shared by every demo visitor.
 
 ```bash
-terraform plan -destroy -var project_id=$PROJECT_ID -out="$STATE_DIR/destroy.tfplan"
-terraform apply "$STATE_DIR/destroy.tfplan"
+terraform plan -destroy -var project_id=$PROJECT_ID -out=destroy.tfplan
+terraform apply destroy.tfplan
 ```
 
 Buckets use `force_destroy = true`, so a destroy also deletes their objects.
 Cloud KMS key rings and keys cannot be deleted: a destroy schedules the key
 versions for destruction and the names stay taken. APIs stay enabled
-(`disable_on_destroy = false`).
+(`disable_on_destroy = false`). The state bucket is not part of the stack
+and is removed only deliberately, after the stack is gone.
 
 ## Checks
 
